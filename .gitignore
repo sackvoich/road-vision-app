@@ -9,6 +9,9 @@ wheels/
 # Virtual environments
 .venv
 
+# YOLO Models
+models/
+
 # Created by https://www.toptal.com/developers/gitignore/api/macos,linux,windows,python,visualstudiocode
 # Edit at https://www.toptal.com/developers/gitignore?templates=macos,linux,windows,python,visualstudiocode
 
