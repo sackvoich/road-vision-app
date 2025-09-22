@@ -23,7 +23,7 @@ app.add_middleware(
 )
 
 # Модель детекции
-model = YOLO('yolov8n.pt')  # Автоматически скачает маленькую модель
+model = YOLO('./models/traffic_signs_detection_model.pt')  # Автоматически скачает маленькую модель
 
 # Глобальные переменные для ограничения FPS
 last_processed_time = 0
