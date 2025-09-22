@@ -9,11 +9,17 @@ import base64
 import asyncio
 import json
 from ultralytics import YOLO
+from ultralytics.utils import ThreadingLocked
 import logging
 
-app = FastAPI(title="Simple Video Processor")
+# --- Настройка логгирования ---
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# CORS
+# --- Инициализация FastAPI ---
+app = FastAPI(title="Multi-Model Video Processor")
+
+# --- CORS ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,14 +28,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Загрузка моделей
-detection_model = YOLO('./models/traffic_signs_detection_model.pt')
-segmentation_model = YOLO('./models/zebra_segmentation_model.pt')
+# --- Загрузка моделей ---
+# Поместите ваши модели в папку 'models'
+try:
+    detection_model = YOLO('./models/traffic_signs_detection_model.pt')
+    segmentation_model = YOLO('./models/zebra_segmentation_model.pt')
+    logger.info("Models loaded successfully.")
+except Exception as e:
+    logger.error(f"Error loading models: {e}")
+    # Если модели не загрузились, приложение не сможет работать
+    detection_model = None
+    segmentation_model = None
 
-# Глобальные переменные для ограничения FPS
+# --- Глобальные переменные для ограничения FPS ---
 last_processed_time = 0
-min_interval = 0.2  # 5 FPS максимум
+MIN_INTERVAL = 0.2  # 5 FPS максимум
 
+# --- Менеджер WebSocket соединений ---
 class ConnectionManager:
     def __init__(self):
         self.active_connections = []
@@ -37,110 +52,130 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
+        logger.info("Client connected.")
 
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
+        logger.info("Client disconnected.")
 
     async def send_json(self, data: dict, websocket: WebSocket):
         await websocket.send_json(data)
 
 manager = ConnectionManager()
 
-def process_frame(frame_data: str) -> dict:
-    """Обработка кадра двумя нейросетями: детекция знаков и сегментация зебр"""
+
+# --- Функции обработки для каждой модели (СИНХРОННЫЕ) ---
+@ThreadingLocked()
+def run_detection(frame: np.ndarray) -> list:
+    """Запускает модель детекции и форматирует результат."""
+    detections = []
+    if detection_model is None:
+        return detections
+        
+    results = detection_model(frame, verbose=False, conf=0.1)
+    for result in results:
+        boxes = result.boxes
+        if boxes is not None:
+            for box in boxes:
+                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                conf = box.conf[0].cpu().numpy()
+                cls = int(box.cls[0].cpu().numpy())
+                class_name = detection_model.names.get(cls, str(cls))
+                detections.append({
+                    'class': class_name,
+                    'confidence': float(conf),
+                    'bbox': [float(x1), float(y1), float(x2), float(y2)]
+                })
+    return detections
+
+@ThreadingLocked()
+def run_segmentation(frame: np.ndarray) -> list:
+    """Запускает модель сегментации и форматирует результат."""
+    segmentations = []
+    if segmentation_model is None:
+        return segmentations
+        
+    results = segmentation_model(frame, verbose=False, conf=0.1)
+    for result in results:
+        masks = result.masks
+        if masks is not None and masks.xy is not None:
+            for i, mask_points in enumerate(masks.xy):
+                # Для сегментации также можно получить класс и уверенность, если они есть
+                cls = int(result.boxes[i].cls[0].cpu().numpy())
+                conf = float(result.boxes[i].conf[0].cpu().numpy())
+                class_name = segmentation_model.names.get(cls, str(cls))
+                
+                segmentations.append({
+                    'class': class_name,
+                    'confidence': conf,
+                    'points': mask_points.tolist() # [[x1, y1], [x2, y2], ...]
+                })
+    return segmentations
+
+
+# --- Главная функция обработки (АСИНХРОННАЯ) ---
+
+async def process_frame_parallel(frame_data: str) -> dict:
+    """Декодирует кадр и запускает обе модели в параллельных потоках."""
     try:
-        # Декодируем base64 в numpy array
         nparr = np.frombuffer(base64.b64decode(frame_data), np.uint8)
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
         if frame is None:
             return {"error": "Failed to decode image"}
 
-        results = {}
+        # Запускаем обе синхронные функции параллельно в отдельных потоках
+        detection_task = asyncio.to_thread(run_detection, frame)
+        segmentation_task = asyncio.to_thread(run_segmentation, frame)
 
-        # --- Детекция дорожных знаков ---
-        det_results = detection_model(frame, verbose=False)
-        detections = []
-        for result in det_results:
-            boxes = result.boxes
-            if boxes is not None:
-                for box in boxes:
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                    conf = box.conf[0].cpu().numpy()
-                    cls = int(box.cls[0].cpu().numpy())
-                    class_name = detection_model.names[cls] if cls in detection_model.names else str(cls)
-                    detections.append({
-                        'class': class_name,
-                        'class_id': cls,
-                        'confidence': float(conf),
-                        'bbox': [float(x1), float(y1), float(x2), float(y2)]
-                    })
-        results['traffic_signs'] = detections
-
-        # --- Сегментация пешеходных переходов (зебр) ---
-        seg_results = segmentation_model(frame, verbose=False)
-        zebra_crossings = []
-        for result in seg_results:
-            if result.masks is not None:
-                for mask, box, conf, cls in zip(result.masks.data, result.boxes.xyxy, result.boxes.conf, result.boxes.cls):
-                    x1, y1, x2, y2 = box.cpu().numpy()
-                    confidence = conf.cpu().numpy()
-                    class_id = int(cls.cpu().numpy())
-                    class_name = segmentation_model.names[class_id] if class_id in segmentation_model.names else str(class_id)
-                    
-                    zebra_crossings.append({
-                        'class': class_name,
-                        'class_id': class_id,
-                        'confidence': float(confidence),
-                        'bbox': [float(x1), float(y1), float(x2), float(y2)],
-                    })
-        results['zebra_crossings'] = zebra_crossings
-
-        # Общая статистика
-        results['timestamp'] = asyncio.get_event_loop().time()
-        results['total_detections'] = len(detections) + len(zebra_crossings)
-
-        return results
-
-    except Exception as e:
-        logging.error(f"Error processing frame: {e}")
+        # Ожидаем завершения обеих задач
+        detection_results, segmentation_results = await asyncio.gather(
+            detection_task,
+            segmentation_task
+        )
+        
         return {
-            'traffic_signs': [],
-            'zebra_crossings': [],
-            'error': str(e)
+            'detections': detection_results,
+            'segmentations': segmentation_results,
+            'timestamp': asyncio.get_event_loop().time()
         }
+    
+    except Exception as e:
+        logger.error(f"Error in parallel processing: {e}")
+        return {'detections': [], 'segmentations': [], 'error': str(e)}
 
+# --- WebSocket Endpoint ---
 @app.websocket("/ws/video")
 async def websocket_video_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     global last_processed_time
+    
     try:
         while True:
-            # Получаем кадр от клиента
             data = await websocket.receive_text()
-            # Ограничение FPS - пропускаем кадры если слишком часто
+            
             current_time = asyncio.get_event_loop().time()
-            if current_time - last_processed_time < min_interval:
-                await websocket.send_json({
-                    "status": "skipped",
-                    "message": "Frame rate limited"
-                })
-                continue
+            if current_time - last_processed_time < MIN_INTERVAL:
+                # Пропускаем кадр для соблюдения FPS
+                continue 
+            
             last_processed_time = current_time
-
-            # Обработка кадра
-            result = process_frame(data)
-            # Отправка результатов обратно
+            
+            # Асинхронно обрабатываем кадр обеими моделями
+            result = await process_frame_parallel(data)
+            
+            # Отправляем объединенные результаты
             await manager.send_json(result, websocket)
-
+            
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-        print("Client disconnected")
     except Exception as e:
-        logging.error(f"WebSocket error: {e}")
+        logger.error(f"WebSocket error: {e}")
         manager.disconnect(websocket)
 
-# Статический файл для фронтенда
+
+# --- Статический HTML для фронтенда (без изменений) ---
 @app.get("/")
 async def get_frontend():
     return HTMLResponse("""
@@ -150,23 +185,27 @@ async def get_frontend():
         <title>Video Stream Processor</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
-            body { font-family: Arial, sans-serif; margin: 20px; }
-            .container { max-width: 800px; margin: 0 auto; }
-            .video-container { display: flex; gap: 20px; margin-bottom: 20px; }
-            video, canvas { width: 300px; height: 225px; border: 2px solid #ccc; }
-            button { padding: 10px 20px; margin: 5px; font-size: 16px; }
-            .controls { margin-bottom: 20px; }
-            .results { background: #f5f5f5; padding: 15px; border-radius: 5px; }
+            body { font-family: Arial, sans-serif; margin: 20px; background-color: #f0f2f5; }
+            .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+            .video-container { display: flex; flex-wrap: wrap; gap: 20px; margin-bottom: 20px; justify-content: center; }
+            video, canvas { width: 320px; height: 240px; border: 2px solid #ccc; border-radius: 4px; }
+            button { padding: 10px 20px; margin: 5px; font-size: 16px; border: none; border-radius: 5px; cursor: pointer; background-color: #007bff; color: white; }
+            button:disabled { background-color: #cccccc; }
+            .controls { margin-bottom: 20px; text-align: center; }
+            .results { background: #f5f5f5; padding: 15px; border-radius: 5px; max-height: 200px; overflow-y: auto; }
+            h1, h3 { text-align: center; color: #333; }
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>📹 Video Stream Processor</h1>
+            <h1>📹 Multi-Model Processor</h1>
+            
             <div class="controls">
                 <button id="startBtn">▶️ Start Streaming</button>
                 <button id="stopBtn" disabled>⏹️ Stop Streaming</button>
-                <span id="status">Status: Ready</span>
+                <div id="status" style="margin-top: 10px;">Status: Ready</div>
             </div>
+
             <div class="video-container">
                 <div>
                     <h3>Live Camera</h3>
@@ -174,14 +213,16 @@ async def get_frontend():
                 </div>
                 <div>
                     <h3>Processed</h3>
-                    <canvas id="canvas"></canvas>
+                    <canvas id="canvas" width="640" height="480"></canvas>
                 </div>
             </div>
+
             <div class="results">
                 <h3>Detection Results:</h3>
                 <pre id="results"></pre>
             </div>
         </div>
+
         <script src="/static/app.js"></script>
     </body>
     </html>
@@ -192,4 +233,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    if detection_model is None or segmentation_model is None:
+        logger.error("Could not start server because one or more models failed to load.")
+    else:
+        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
