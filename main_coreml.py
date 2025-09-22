@@ -1,4 +1,3 @@
-# main.py
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -10,264 +9,568 @@ import asyncio
 import logging
 from PIL import Image
 import coremltools as ct
+from typing import List, Dict, Tuple, Optional
 
-# --- 1. Настройка ---
+# --- Configuration ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Core ML Video Processor")
 
-# CORS (на всякий случай)
+# CORS Configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# --- 2. Загрузка моделей Core ML ---
+# --- Load Core ML Models ---
+detection_model = None
+segmentation_model = None
+
 try:
     logger.info("Loading Core ML models...")
-    # Модель знаков с NMS
-    detection_model = ct.models.MLModel('./models/traffic_signs_detection_model.mlpackage', compute_units=ct.ComputeUnit.ALL)
-    # Модель сегментации без NMS
-    segmentation_model = ct.models.MLModel('./models/zebra_segmentation_model.mlpackage', compute_units=ct.ComputeUnit.ALL)
+    detection_model = ct.models.MLModel(
+        './models/traffic_signs_detection_model.mlpackage',
+        compute_units=ct.ComputeUnit.ALL
+    )
+    segmentation_model = ct.models.MLModel(
+        './models/zebra_segmentation_model.mlpackage',
+        compute_units=ct.ComputeUnit.ALL
+    )
     logger.info("Core ML models loaded successfully.")
 except Exception as e:
     logger.error(f"Error loading Core ML models: {e}")
-    detection_model = None
-    segmentation_model = None
 
-# --- 3. Глобальные переменные и менеджер WebSocket ---
+# --- Global Variables ---
+MIN_FRAME_INTERVAL = 0.1  # 10 FPS max
 last_processed_time = 0
-MIN_INTERVAL = 0.1  # 10 FPS
 
+# --- WebSocket Connection Manager ---
 class ConnectionManager:
     def __init__(self):
-        self.active_connections = []
+        self.active_connections: List[WebSocket] = []
+    
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
+    
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
+    
     async def send_json(self, data: dict, websocket: WebSocket):
-        await websocket.send_json(data)
+        try:
+            await websocket.send_json(data)
+        except Exception as e:
+            logger.error(f"Error sending data: {e}")
 
 manager = ConnectionManager()
 
-# --- 4. Функции предобработки и парсинга ---
-
-def preprocess_image_for_coreml(img: Image.Image, target_size=(640, 640)) -> tuple:
-    """Изменяет размер изображения с сохранением пропорций и добавляет поля (letterboxing)."""
-    original_w, original_h = img.size
+# --- Image Preprocessing ---
+def letterbox_image(image: Image.Image, target_size: Tuple[int, int] = (640, 640)) -> Tuple[Image.Image, float, Tuple[int, int], Tuple[int, int]]:
+    """
+    Resize image with padding (letterboxing) to maintain aspect ratio.
+    Returns: (padded_image, scale_factor, padding, original_size)
+    """
+    original_w, original_h = image.size
     target_w, target_h = target_size
-    ratio = min(target_w / original_w, target_h / original_h)
-    new_w, new_h = int(original_w * ratio), int(original_h * ratio)
     
-    resized_img = img.resize((new_w, new_h), Image.LANCZOS)
-    padded_img = Image.new("RGB", target_size, (114, 114, 114))
-    pad_x, pad_y = (target_w - new_w) // 2, (target_h - new_h) // 2
+    # Calculate scale to fit image within target size
+    scale = min(target_w / original_w, target_h / original_h)
+    new_w = int(original_w * scale)
+    new_h = int(original_h * scale)
     
-    padded_img.paste(resized_img, (pad_x, pad_y))
-    return padded_img, ratio, (pad_x, pad_y)
+    # Resize image
+    resized = image.resize((new_w, new_h), Image.LANCZOS)
+    
+    # Create padded image
+    padded = Image.new("RGB", target_size, (114, 114, 114))
+    pad_x = (target_w - new_w) // 2
+    pad_y = (target_h - new_h) // 2
+    padded.paste(resized, (pad_x, pad_y))
+    
+    return padded, scale, (pad_x, pad_y), (original_w, original_h)
 
-def parse_detection_with_nms(results: dict) -> list:
-    """Парсит вывод модели детекции со встроенным NMS."""
+# --- Detection Model Processing ---
+def process_detection_output(output: dict, scale: float, padding: Tuple[int, int], 
+                           original_size: Tuple[int, int]) -> List[Dict]:
+    """
+    Process detection model output with NMS already applied.
+    Coordinates are relative (0-1 range) in format [x_center, y_center, width, height]
+    """
     detections = []
-    boxes = results.get('coordinates')
-    confidences = results.get('confidence')
-
-    if boxes is None or confidences is None:
-        logger.warning("Detection model output is missing 'coordinates' or 'confidence'.")
+    
+    coordinates = output.get('coordinates')
+    confidences = output.get('confidence')
+    
+    if coordinates is None or confidences is None:
+        logger.warning("Missing detection outputs")
         return []
-
-    for i, box in enumerate(boxes):
-        class_id = np.argmax(confidences[i])
-        confidence = confidences[i][class_id]
+    
+    # Get dimensions
+    num_boxes = coordinates.shape[0]
+    model_size = 640  # Model input size
+    pad_x, pad_y = padding
+    orig_w, orig_h = original_size
+    
+    for i in range(num_boxes):
+        # Get confidence scores for all classes
+        class_confidences = confidences[i]
+        class_id = np.argmax(class_confidences)
+        confidence = float(class_confidences[class_id])
         
-        # Координаты от модели: [center_x, center_y, width, height]
-        cx, cy, w, h = box
-        x1, y1 = cx - w / 2, cy - h / 2
-        x2, y2 = x1 + w, y1 + h
-
+        # Skip low confidence detections
+        if confidence < 0.25:
+            continue
+        
+        # Get box coordinates (relative to model input size)
+        cx_rel, cy_rel, w_rel, h_rel = coordinates[i]
+        
+        # Convert relative coordinates to pixel coordinates in model space
+        cx = cx_rel * model_size
+        cy = cy_rel * model_size
+        w = w_rel * model_size
+        h = h_rel * model_size
+        
+        # Convert center coordinates to corner coordinates
+        x1 = cx - w / 2
+        y1 = cy - h / 2
+        x2 = x1 + w
+        y2 = y1 + h
+        
+        # Remove padding offset
+        x1 -= pad_x
+        y1 -= pad_y
+        x2 -= pad_x
+        y2 -= pad_y
+        
+        # Scale back to original image dimensions
+        x1 = x1 / scale
+        y1 = y1 / scale
+        x2 = x2 / scale
+        y2 = y2 / scale
+        
+        # Clip to image bounds
+        x1 = max(0, min(x1, orig_w))
+        y1 = max(0, min(y1, orig_h))
+        x2 = max(0, min(x2, orig_w))
+        y2 = max(0, min(y2, orig_h))
+        
         detections.append({
-            'class': f"Sign_{class_id}",
-            'confidence': float(confidence),
+            'class': f'Sign_{class_id}',
+            'confidence': confidence,
             'bbox': [float(x1), float(y1), float(x2), float(y2)]
         })
+    
     return detections
 
-def parse_raw_segmentation(results: dict, conf_threshold=0.3, nms_threshold=0.45) -> list:
-    """Парсит сырой вывод модели сегментации (без NMS)."""
-    raw_predictions = results.get('var_1368')
-    proto_masks = results.get('p')
-
-    if raw_predictions is None or proto_masks is None:
-        logger.warning("Segmentation model output is missing raw tensors.")
-        return []
-
-    raw_predictions, proto_masks = raw_predictions[0].T, proto_masks[0]
-    boxes, scores, class_ids, mask_coeffs = [], [], [], []
+# --- Segmentation Model Processing ---
+def process_segmentation_output(output: dict, scale: float, padding: Tuple[int, int],
+                              original_size: Tuple[int, int], conf_threshold: float = 0.3,
+                              nms_threshold: float = 0.45) -> List[Dict]:
+    """
+    Process raw segmentation output and apply NMS.
+    """
+    segmentations = []
     
-    for row in raw_predictions:
-        cx, cy, w, h, score, mask_coeff = row[0], row[1], row[2], row[3], row[4], row[5:]
+    raw_predictions = output.get('var_1368')
+    proto_masks = output.get('p')
+    
+    if raw_predictions is None or proto_masks is None:
+        logger.warning("Missing segmentation outputs")
+        return []
+    
+    # Shape: [1, 37, 8400] -> [8400, 37]
+    predictions = raw_predictions[0].T
+    masks = proto_masks[0]  # [32, 160, 160]
+    
+    model_size = 640
+    pad_x, pad_y = padding
+    orig_w, orig_h = original_size
+    
+    # Extract boxes and masks
+    boxes = []
+    scores = []
+    mask_coeffs = []
+    
+    for pred in predictions:
+        # First 4 values are box coordinates
+        cx, cy, w, h = pred[:4]
+        # 5th value is confidence
+        score = pred[4]
+        # Remaining 32 values are mask coefficients
+        mask_coeff = pred[5:37]
+        
         if score < conf_threshold:
             continue
         
-        boxes.append([int(cx - w/2), int(cy - h/2), int(w), int(h)])
+        # Convert to corner format for NMS
+        x1 = int(cx - w/2)
+        y1 = int(cy - h/2)
+        boxes.append([x1, y1, int(w), int(h)])
         scores.append(float(score))
-        class_ids.append(0)
         mask_coeffs.append(mask_coeff)
-
-    if not boxes: return []
-        
-    indices = cv2.dnn.NMSBoxes(boxes, scores, conf_threshold, nms_threshold)
-    final_segmentations = []
-    mask_h, mask_w = proto_masks.shape[1:]
     
-    for i in indices:
-        coeff = mask_coeffs[i]
-        final_mask = np.zeros((mask_h, mask_w), dtype=np.float32)
-        for j in range(coeff.shape[0]):
-             final_mask += coeff[j] * proto_masks[j]
+    if not boxes:
+        return []
+    
+    # Apply NMS
+    indices = cv2.dnn.NMSBoxes(boxes, scores, conf_threshold, nms_threshold)
+    if indices is None or len(indices) == 0:
+        return []
+    
+    # Process selected detections
+    indices = indices.flatten() if hasattr(indices, 'flatten') else indices
+    
+    for idx in indices:
+        # Get mask coefficients
+        coeff = mask_coeffs[idx]
         
-        final_mask = 1 / (1 + np.exp(-final_mask))
-        x1, y1, w, h = boxes[i]
-        resized_mask = cv2.resize(final_mask, (w, h))
-        binary_mask = (resized_mask > 0.5).astype(np.uint8)
+        # Generate mask from prototypes
+        mask = np.zeros((160, 160), dtype=np.float32)
+        for j in range(32):
+            mask += coeff[j] * masks[j]
         
-        contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Apply sigmoid
+        mask = 1 / (1 + np.exp(-mask))
         
-        if not contours: continue
-        main_contour = max(contours, key=cv2.contourArea).squeeze(1)
-        main_contour = main_contour + np.array([x1, y1])
+        # Get box in model coordinates
+        x1, y1, w, h = boxes[idx]
+        cx = x1 + w/2
+        cy = y1 + h/2
         
-        final_segmentations.append({
-            'class': 'Zebra',
-            'confidence': scores[i],
-            'points': main_contour.tolist()
-        })
-        
-    return final_segmentations
+        # Scale mask to box size
+        if w > 0 and h > 0:
+            resized_mask = cv2.resize(mask, (w, h))
+            binary_mask = (resized_mask > 0.5).astype(np.uint8)
+            
+            # Find contours
+            contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            if contours:
+                # Get largest contour
+                main_contour = max(contours, key=cv2.contourArea)
+                
+                # Simplify contour
+                epsilon = 0.01 * cv2.arcLength(main_contour, True)
+                simplified = cv2.approxPolyDP(main_contour, epsilon, True)
+                
+                # Transform points to original image coordinates
+                points = []
+                for point in simplified:
+                    px = point[0][0] + x1  # Add box offset
+                    py = point[0][1] + y1
+                    
+                    # Remove padding
+                    px = (px - pad_x) / scale
+                    py = (py - pad_y) / scale
+                    
+                    # Clip to bounds
+                    px = max(0, min(px, orig_w))
+                    py = max(0, min(py, orig_h))
+                    
+                    points.append([float(px), float(py)])
+                
+                if len(points) >= 3:  # Need at least 3 points for a polygon
+                    segmentations.append({
+                        'class': 'Zebra',
+                        'confidence': scores[idx],
+                        'points': points
+                    })
+    
+    return segmentations
 
-# --- 5. Главная функция обработки кадра ---
-async def process_frame_parallel_coreml(frame_data: str) -> dict:
+# --- Main Frame Processing ---
+async def process_frame(frame_data: str) -> dict:
+    """Process a single frame through both models."""
     try:
-        nparr = np.frombuffer(base64.b64decode(frame_data), np.uint8)
+        # Decode image
+        image_bytes = base64.b64decode(frame_data)
+        nparr = np.frombuffer(image_bytes, np.uint8)
         frame_cv2 = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if frame_cv2 is None: return {"error": "Failed to decode image"}
         
-        frame_pil = Image.fromarray(cv2.cvtColor(frame_cv2, cv2.COLOR_BGR2RGB))
-        padded_image, scale, (pad_x, pad_y) = preprocess_image_for_coreml(frame_pil)
-
-        def predict_detection():
-            return detection_model.predict({'image': padded_image, 'confidenceThreshold': 0.25})
-        def predict_segmentation():
-            return segmentation_model.predict({'image': padded_image})
+        if frame_cv2 is None:
+            return {"error": "Failed to decode image"}
         
-        det_results_task = asyncio.to_thread(predict_detection)
-        seg_results_task = asyncio.to_thread(predict_segmentation)
-        raw_det_results, raw_seg_results = await asyncio.gather(det_results_task, seg_results_task)
-
-        det_parse_task = asyncio.to_thread(parse_detection_with_nms, raw_det_results)
-        seg_parse_task = asyncio.to_thread(parse_raw_segmentation, raw_seg_results)
-        detection_results, segmentation_results = await asyncio.gather(det_parse_task, seg_parse_task)
+        # Convert to PIL Image
+        frame_rgb = cv2.cvtColor(frame_cv2, cv2.COLOR_BGR2RGB)
+        frame_pil = Image.fromarray(frame_rgb)
         
-        for res in detection_results + segmentation_results:
-            if 'bbox' in res:
-                box = res['bbox']
-                x1, y1, x2, y2 = box[0]-pad_x, box[1]-pad_y, box[2]-pad_x, box[3]-pad_y
-                res['bbox'] = [x1/scale, y1/scale, x2/scale, y2/scale]
-            if 'points' in res:
-                points = np.array(res['points']) - np.array([pad_x, pad_y])
-                res['points'] = (points / scale).tolist()
-
+        # Get original dimensions
+        original_size = frame_pil.size
+        
+        # Preprocess image
+        padded_image, scale, padding, _ = letterbox_image(frame_pil)
+        
+        # Run models in parallel
+        async def run_detection():
+            return await asyncio.to_thread(
+                detection_model.predict,
+                {'image': padded_image, 'confidenceThreshold': 0.25, 'iouThreshold': 0.7}
+            )
+        
+        async def run_segmentation():
+            return await asyncio.to_thread(
+                segmentation_model.predict,
+                {'image': padded_image}
+            )
+        
+        # Execute both models
+        detection_task = run_detection()
+        segmentation_task = run_segmentation()
+        
+        det_output, seg_output = await asyncio.gather(detection_task, segmentation_task)
+        
+        # Process outputs
+        detections = process_detection_output(det_output, scale, padding, original_size)
+        segmentations = process_segmentation_output(seg_output, scale, padding, original_size)
+        
         return {
-            'detections': detection_results,
-            'segmentations': segmentation_results,
+            'detections': detections,
+            'segmentations': segmentations,
             'timestamp': asyncio.get_event_loop().time()
         }
+        
     except Exception as e:
-        logger.error(f"Error in Core ML processing: {e}", exc_info=True)
-        return {'detections': [], 'segmentations': [], 'error': str(e)}
+        logger.error(f"Error processing frame: {e}", exc_info=True)
+        return {'error': str(e), 'detections': [], 'segmentations': []}
 
-# --- 6. WebSocket Endpoint ---
+# --- WebSocket Endpoint ---
 @app.websocket("/ws/video")
 async def websocket_video_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     global last_processed_time
+    
     try:
         while True:
+            # Receive frame data
             data = await websocket.receive_text()
+            
+            # Rate limiting
             current_time = asyncio.get_event_loop().time()
-            if current_time - last_processed_time < MIN_INTERVAL:
+            if current_time - last_processed_time < MIN_FRAME_INTERVAL:
                 continue
+            
             last_processed_time = current_time
             
-            result = await process_frame_parallel_coreml(data)
+            # Process frame
+            result = await process_frame(data)
+            
+            # Send results
             await manager.send_json(result, websocket)
             
     except WebSocketDisconnect:
+        logger.info("Client disconnected")
         manager.disconnect(websocket)
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
         manager.disconnect(websocket)
 
-# --- 7. Статический HTML для фронтенда ---
+# --- Static HTML Frontend ---
 @app.get("/")
 async def get_frontend():
     return HTMLResponse("""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Video Stream Processor</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <style>
-            body { font-family: Arial, sans-serif; margin: 20px; background-color: #f0f2f5; }
-            .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-            .video-container { display: flex; flex-wrap: wrap; gap: 20px; margin-bottom: 20px; justify-content: center; }
-            video, canvas { width: 100%; max-width: 640px; height: auto; border: 2px solid #ccc; border-radius: 4px; }
-            .video-box { flex: 1; min-width: 320px; }
-            button { padding: 10px 20px; margin: 5px; font-size: 16px; border: none; border-radius: 5px; cursor: pointer; background-color: #007bff; color: white; }
-            button:disabled { background-color: #cccccc; }
-            .controls { margin-bottom: 20px; text-align: center; }
-            .results { background: #2b2b2b; color: #f1f1f1; padding: 15px; border-radius: 5px; max-height: 200px; overflow-y: auto; font-family: "Courier New", Courier, monospace;}
-            h1, h3 { text-align: center; color: #333; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>📹 Multi-Model Core ML Processor</h1>
-            <div class="controls">
-                <button id="startBtn">▶️ Start Streaming</button>
-                <button id="stopBtn" disabled>⏹️ Stop Streaming</button>
-                <div id="status" style="margin-top: 10px;">Status: Ready</div>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Core ML Video Stream Processor</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 30px;
+            font-size: 2.5em;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+        }
+        button {
+            padding: 12px 30px;
+            font-size: 16px;
+            font-weight: 600;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+        }
+        button:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+        #status {
+            text-align: center;
+            padding: 10px;
+            background: #f0f0f0;
+            border-radius: 10px;
+            font-weight: 500;
+            color: #666;
+        }
+        .video-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .video-box {
+            background: white;
+            border-radius: 15px;
+            overflow: hidden;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.1);
+        }
+        .video-box h3 {
+            padding: 15px;
+            background: #f8f9fa;
+            margin: 0;
+            color: #495057;
+            font-size: 1.2em;
+        }
+        video, canvas {
+            width: 100%;
+            height: auto;
+            display: block;
+            background: #000;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            background: white;
+            padding: 15px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+            text-align: center;
+        }
+        .stat-label {
+            color: #868e96;
+            font-size: 0.9em;
+            margin-bottom: 5px;
+        }
+        .stat-value {
+            color: #495057;
+            font-size: 1.8em;
+            font-weight: 700;
+        }
+        .results {
+            background: #2d3436;
+            color: #dfe6e9;
+            padding: 20px;
+            border-radius: 10px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            max-height: 300px;
+            overflow-y: auto;
+            font-size: 0.9em;
+        }
+        .results h3 {
+            color: #74b9ff;
+            margin-bottom: 10px;
+        }
+        pre {
+            margin: 0;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚦 Core ML Traffic Analysis</h1>
+        
+        <div class="controls">
+            <button id="startBtn">▶️ Start Streaming</button>
+            <button id="stopBtn" disabled>⏹️ Stop Streaming</button>
+        </div>
+        
+        <div id="status">Status: Initializing camera...</div>
+        
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-label">FPS</div>
+                <div class="stat-value" id="fps">0</div>
             </div>
-            <div class="video-container">
-                <div class="video-box">
-                    <h3>Live Camera</h3>
-                    <video id="video" autoplay muted playsinline></video>
-                </div>
-                <div class="video-box">
-                    <h3>Processed</h3>
-                    <canvas id="canvas"></canvas>
-                </div>
+            <div class="stat-card">
+                <div class="stat-label">Signs Detected</div>
+                <div class="stat-value" id="signCount">0</div>
             </div>
-            <div class="results">
-                <h3>Detection Results:</h3>
-                <pre id="results"></pre>
+            <div class="stat-card">
+                <div class="stat-label">Zebras Detected</div>
+                <div class="stat-value" id="zebraCount">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Processing Time</div>
+                <div class="stat-value" id="processTime">0ms</div>
             </div>
         </div>
-        <script src="/static/app_coreml.js"></script>
-    </body>
-    </html>
+        
+        <div class="video-container">
+            <div class="video-box">
+                <h3>📷 Live Camera Feed</h3>
+                <video id="video" autoplay muted playsinline></video>
+            </div>
+            <div class="video-box">
+                <h3>🤖 AI Processed</h3>
+                <canvas id="canvas"></canvas>
+            </div>
+        </div>
+        
+        <div class="results">
+            <h3>📊 Detection Results:</h3>
+            <pre id="results">Waiting for data...</pre>
+        </div>
+    </div>
+    
+    <script src="/static/app.js"></script>
+</body>
+</html>
     """)
 
+# Mount static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# --- 8. Запуск сервера ---
+# --- Main Entry Point ---
 if __name__ == "__main__":
     import uvicorn
+    
     if detection_model is None or segmentation_model is None:
-        logger.error("Could not start server because one or more models failed to load.")
-    else:
-        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+        logger.error("Cannot start server: Models failed to load")
+        exit(1)
+    
+    logger.info("Starting server on http://0.0.0.0:8000")
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
