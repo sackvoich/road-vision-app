@@ -24,11 +24,18 @@ app.add_middleware(
 )
 
 # Load both models
-traffic_model = YOLO('./models/traffic_signs_detection_model.pt')
-zebra_model = YOLO('./models/zebra_segmentation_model.pt')
+try:
+    traffic_model = YOLO('./models/traffic_signs_detection_model.pt')
+    zebra_model = YOLO('./models/zebra_segmentation_model.pt')
+    print("Models loaded successfully")
+except Exception as e:
+    print(f"Error loading models: {e}")
+    # Fallback to standard models if custom models fail
+    traffic_model = YOLO('yolov8n.pt')
+    zebra_model = YOLO('yolov8n.pt')
 
 # Thread pool for running models
-executor = ThreadPoolExecutor(max_workers=2)
+executor = ThreadPoolExecutor(max_workers=4)
 
 class ConnectionManager:
     def __init__(self):
@@ -37,13 +44,18 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
+        print(f"Client connected. Total: {len(self.active_connections)}")
 
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
+        print(f"Client disconnected. Total: {len(self.active_connections)}")
 
     async def send_json(self, data: dict, websocket: WebSocket):
-        await websocket.send_json(data)
+        try:
+            await websocket.send_json(data)
+        except Exception as e:
+            print(f"Error sending data: {e}")
 
 manager = ConnectionManager()
 
@@ -61,7 +73,6 @@ def process_frame_with_model(model, frame, model_name):
                     conf = box.conf[0].cpu().numpy()
                     cls = int(box.cls[0].cpu().numpy())
                     
-                    # Get class name
                     class_name = model.names[cls] if cls in model.names else str(cls)
                     
                     detections.append({
@@ -87,11 +98,12 @@ def process_frame(frame_data: str, enabled_models: dict, scale_factor: float = 1
         if frame is None:
             return {"error": "Failed to decode image"}
         
+        original_height, original_width = frame.shape[:2]
+        
         # Apply scaling if needed
         if scale_factor != 1.0:
-            height, width = frame.shape[:2]
-            new_width = int(width * scale_factor)
-            new_height = int(height * scale_factor)
+            new_width = int(original_width * scale_factor)
+            new_height = int(original_height * scale_factor)
             frame = cv2.resize(frame, (new_width, new_height))
         
         # Process with enabled models
@@ -105,16 +117,38 @@ def process_frame(frame_data: str, enabled_models: dict, scale_factor: float = 1
             zebra_detections = process_frame_with_model(zebra_model, frame, 'zebra')
             all_detections.extend(zebra_detections)
         
+        # Scale bounding boxes back to original size if scaling was applied
+        if scale_factor != 1.0:
+            for detection in all_detections:
+                detection['bbox'] = [
+                    detection['bbox'][0] / scale_factor,
+                    detection['bbox'][1] / scale_factor,
+                    detection['bbox'][2] / scale_factor,
+                    detection['bbox'][3] / scale_factor
+                ]
+        
         return {
             'detections': all_detections,
             'timestamp': time.time(),
             'objects_count': len(all_detections),
-            'scale_factor': scale_factor
+            'scale_factor': scale_factor,
+            'original_size': [original_width, original_height]
         }
     
     except Exception as e:
         logging.error(f"Error processing frame: {e}")
         return {'detections': [], 'error': str(e)}
+
+async def process_frame_async(frame_data: str, enabled_models: dict, scale_factor: float):
+    """Async wrapper for frame processing"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        executor, 
+        process_frame, 
+        frame_data, 
+        enabled_models, 
+        scale_factor
+    )
 
 @app.websocket("/ws/video")
 async def websocket_video_endpoint(websocket: WebSocket):
@@ -124,19 +158,30 @@ async def websocket_video_endpoint(websocket: WebSocket):
         while True:
             # Receive data from client
             data = await websocket.receive_text()
-            request = json.loads(data)
+            
+            try:
+                request = json.loads(data)
+            except json.JSONDecodeError:
+                await websocket.send_json({"error": "Invalid JSON"})
+                continue
             
             # Extract frame and settings
-            frame_data = request.get('frame')
+            frame_data = request.get('frame', '')
             settings = request.get('settings', {})
+            
+            if not frame_data:
+                await websocket.send_json({"error": "No frame data"})
+                continue
             
             # Get settings
             enabled_models = settings.get('models', {'traffic': True, 'zebra': False})
-            fps_limit = settings.get('fps_limit', 5)
             scale_factor = settings.get('scale_factor', 1.0)
             
-            # Process frame
-            result = process_frame(frame_data, enabled_models, scale_factor)
+            # Validate scale factor
+            scale_factor = max(0.1, min(1.0, scale_factor))  # Clamp between 0.1 and 1.0
+            
+            # Process frame asynchronously
+            result = await process_frame_async(frame_data, enabled_models, scale_factor)
             
             # Send results back
             await manager.send_json(result, websocket)

@@ -1,7 +1,6 @@
 // static/app_v2.js
 class AdvancedVideoProcessor {
     constructor() {
-        // DOM Elements
         this.video = document.getElementById('video');
         this.canvas = document.getElementById('canvas');
         this.ctx = this.canvas.getContext('2d');
@@ -9,7 +8,6 @@ class AdvancedVideoProcessor {
         this.statusElement = document.getElementById('status');
         this.objectCountElement = document.getElementById('objectCount');
         
-        // Control elements
         this.trafficModelCheckbox = document.getElementById('trafficModel');
         this.zebraModelCheckbox = document.getElementById('zebraModel');
         this.fpsSlider = document.getElementById('fpsLimit');
@@ -17,12 +15,14 @@ class AdvancedVideoProcessor {
         this.scaleSlider = document.getElementById('scaleFactor');
         this.scaleValue = document.getElementById('scaleValue');
         
-        // WebSocket and state
         this.ws = null;
         this.isStreaming = false;
         this.lastFrameTime = 0;
         
-        // Bind events and initialize
+        // Установка размеров canvas
+        this.canvas.width = 640;
+        this.canvas.height = 480;
+        
         this.setupEventListeners();
         this.initializeCamera();
         this.setupControlListeners();
@@ -34,12 +34,10 @@ class AdvancedVideoProcessor {
     }
 
     setupControlListeners() {
-        // FPS slider
         this.fpsSlider.addEventListener('input', () => {
             this.fpsValue.textContent = this.fpsSlider.value;
         });
         
-        // Scale slider
         this.scaleSlider.addEventListener('input', () => {
             this.scaleValue.textContent = this.scaleSlider.value;
         });
@@ -51,12 +49,17 @@ class AdvancedVideoProcessor {
                 video: { 
                     width: { ideal: 640 },
                     height: { ideal: 480 },
-                    facingMode: 'environment' // Use rear camera
+                    facingMode: 'environment'
                 },
                 audio: false
             });
             this.video.srcObject = stream;
-            this.updateStatus('Camera ready', 'ready');
+            
+            // Ждем загрузки видео
+            this.video.onloadedmetadata = () => {
+                this.updateStatus('Camera ready', 'ready');
+            };
+            
         } catch (error) {
             this.updateStatus('Camera error: ' + error.message, 'error');
             console.error('Camera error:', error);
@@ -75,7 +78,11 @@ class AdvancedVideoProcessor {
     startStreaming() {
         if (this.isStreaming) return;
 
-        this.ws = new WebSocket(`ws://${window.location.host}/ws/video`);
+        const host = window.location.hostname || 'localhost';
+        const isSecure = window.location.protocol === 'https:';
+        const wsProtocol = isSecure ? 'wss:' : 'ws:';
+        
+        this.ws = new WebSocket(`${wsProtocol}//${host}:8000/ws/video`);
         
         this.ws.onopen = () => {
             this.isStreaming = true;
@@ -86,10 +93,14 @@ class AdvancedVideoProcessor {
         };
 
         this.ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            this.displayResults(data);
-            this.drawDetections(data);
-            this.updateObjectCount(data.objects_count || 0);
+            try {
+                const data = JSON.parse(event.data);
+                this.displayResults(data);
+                this.drawDetections(data);
+                this.updateObjectCount(data.objects_count || 0);
+            } catch (e) {
+                console.error('Error parsing message:', e);
+            }
         };
 
         this.ws.onerror = (error) => {
@@ -116,46 +127,44 @@ class AdvancedVideoProcessor {
     }
 
     sendFrames() {
-        if (!this.isStreaming) return;
+        if (!this.isStreaming || !this.video.videoWidth) return;
 
-        // Respect FPS limit
-        const now = performance.now();
         const fpsLimit = parseInt(this.fpsSlider.value);
         const interval = 1000 / fpsLimit;
+        const now = performance.now();
         
         if (now - this.lastFrameTime >= interval) {
             this.processAndSendFrame();
             this.lastFrameTime = now;
         }
 
-        // Continue sending frames
         requestAnimationFrame(() => this.sendFrames());
     }
 
     processAndSendFrame() {
-        // Draw current frame to canvas
-        this.ctx.drawImage(this.video, 0, 0, this.canvas.width, this.canvas.height);
-        
-        // Convert to base64
-        const imageData = this.canvas.toDataURL('image/jpeg', 0.7);
-        const base64Data = imageData.split(',')[1];
+        try {
+            this.ctx.drawImage(this.video, 0, 0, this.canvas.width, this.canvas.height);
+            
+            const imageData = this.canvas.toDataURL('image/jpeg', 0.7);
+            const base64Data = imageData.split(',')[1];
 
-        // Get current settings
-        const settings = {
-            models: {
-                traffic: this.trafficModelCheckbox.checked,
-                zebra: this.zebraModelCheckbox.checked
-            },
-            fps_limit: parseInt(this.fpsSlider.value),
-            scale_factor: parseInt(this.scaleSlider.value) / 100
-        };
+            const settings = {
+                models: {
+                    traffic: this.trafficModelCheckbox.checked,
+                    zebra: this.zebraModelCheckbox.checked
+                },
+                fps_limit: parseInt(this.fpsSlider.value),
+                scale_factor: parseInt(this.scaleSlider.value) / 100
+            };
 
-        // Send to server
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            this.ws.send(JSON.stringify({
-                frame: base64Data,
-                settings: settings
-            }));
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                this.ws.send(JSON.stringify({
+                    frame: base64Data,
+                    settings: settings
+                }));
+            }
+        } catch (error) {
+            console.error('Error processing frame:', error);
         }
     }
 
@@ -166,33 +175,30 @@ class AdvancedVideoProcessor {
     drawDetections(data) {
         const detections = data.detections || [];
         
-        // Clear canvas
+        // Clear and redraw original image
         this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-        
-        // Draw original image
         this.ctx.drawImage(this.video, 0, 0, this.canvas.width, this.canvas.height);
         
-        // Draw bounding boxes
         detections.forEach(det => {
             const [x1, y1, x2, y2] = det.bbox;
             
-            // Different colors for different models
-            let color;
-            if (det.model === 'traffic') {
-                color = '#00ff00'; // Green for traffic signs
-            } else if (det.model === 'zebra') {
-                color = '#0000ff'; // Blue for zebra crossings
-            } else {
-                color = '#ff0000'; // Red for others
-            }
+            let color = '#00ff00'; // Default green
+            if (det.model === 'traffic') color = '#ff0000'; // Red for traffic
+            if (det.model === 'zebra') color = '#0000ff'; // Blue for zebra
             
-            // Draw rectangle
+            // Draw bounding box
             this.ctx.strokeStyle = color;
-            this.ctx.lineWidth = 2;
+            this.ctx.lineWidth = 3;
             this.ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
             
-            // Draw label
+            // Draw label background
             const label = `${det.class} (${(det.confidence * 100).toFixed(1)}%)`;
+            const textWidth = this.ctx.measureText(label).width;
+            
+            this.ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+            this.ctx.fillRect(x1 - 2, y1 - 20, textWidth + 10, 20);
+            
+            // Draw label text
             this.ctx.fillStyle = color;
             this.ctx.font = '14px Arial';
             this.ctx.fillText(label, x1, y1 - 5);
@@ -200,7 +206,6 @@ class AdvancedVideoProcessor {
     }
 }
 
-// Initialize when page loads
 document.addEventListener('DOMContentLoaded', () => {
     new AdvancedVideoProcessor();
 });
