@@ -22,12 +22,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Модель детекции
-model = YOLO('./models/traffic_signs_detection_model.pt')  # Автоматически скачает маленькую модель
+# Загрузка моделей
+detection_model = YOLO('./models/traffic_signs_detection_model.pt')
+segmentation_model = YOLO('./models/zebra_segmentation_model.pt')
 
 # Глобальные переменные для ограничения FPS
 last_processed_time = 0
-min_interval = 0.2  # 5 FPS максимум (изменяй по необходимости)
+min_interval = 0.2  # 5 FPS максимум
 
 class ConnectionManager:
     def __init__(self):
@@ -47,76 +48,91 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 def process_frame(frame_data: str) -> dict:
-    """Обработка кадра нейросетью"""
+    """Обработка кадра двумя нейросетями: детекция знаков и сегментация зебр"""
     try:
         # Декодируем base64 в numpy array
         nparr = np.frombuffer(base64.b64decode(frame_data), np.uint8)
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        
         if frame is None:
             return {"error": "Failed to decode image"}
-        
-        # Детекция объектов
-        results = model(frame, verbose=False)
-        
-        # Форматирование результатов
+
+        results = {}
+
+        # --- Детекция дорожных знаков ---
+        det_results = detection_model(frame, verbose=False)
         detections = []
-        for result in results:
+        for result in det_results:
             boxes = result.boxes
             if boxes is not None:
                 for box in boxes:
                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                     conf = box.conf[0].cpu().numpy()
                     cls = int(box.cls[0].cpu().numpy())
-                    
-                    # Получаем имя класса
-                    class_name = model.names[cls] if cls in model.names else str(cls)
-                    
+                    class_name = detection_model.names[cls] if cls in detection_model.names else str(cls)
                     detections.append({
                         'class': class_name,
                         'class_id': cls,
                         'confidence': float(conf),
                         'bbox': [float(x1), float(y1), float(x2), float(y2)]
                     })
-        
-        return {
-            'detections': detections,
-            'timestamp': asyncio.get_event_loop().time(),
-            'objects_count': len(detections)
-        }
-    
+        results['traffic_signs'] = detections
+
+        # --- Сегментация пешеходных переходов (зебр) ---
+        seg_results = segmentation_model(frame, verbose=False)
+        zebra_crossings = []
+        for result in seg_results:
+            if result.masks is not None:
+                for mask, box, conf, cls in zip(result.masks.data, result.boxes.xyxy, result.boxes.conf, result.boxes.cls):
+                    x1, y1, x2, y2 = box.cpu().numpy()
+                    confidence = conf.cpu().numpy()
+                    class_id = int(cls.cpu().numpy())
+                    class_name = segmentation_model.names[class_id] if class_id in segmentation_model.names else str(class_id)
+                    
+                    zebra_crossings.append({
+                        'class': class_name,
+                        'class_id': class_id,
+                        'confidence': float(confidence),
+                        'bbox': [float(x1), float(y1), float(x2), float(y2)],
+                    })
+        results['zebra_crossings'] = zebra_crossings
+
+        # Общая статистика
+        results['timestamp'] = asyncio.get_event_loop().time()
+        results['total_detections'] = len(detections) + len(zebra_crossings)
+
+        return results
+
     except Exception as e:
         logging.error(f"Error processing frame: {e}")
-        return {'detections': [], 'error': str(e)}
+        return {
+            'traffic_signs': [],
+            'zebra_crossings': [],
+            'error': str(e)
+        }
 
 @app.websocket("/ws/video")
 async def websocket_video_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     global last_processed_time
-    
     try:
         while True:
             # Получаем кадр от клиента
             data = await websocket.receive_text()
-            
             # Ограничение FPS - пропускаем кадры если слишком часто
             current_time = asyncio.get_event_loop().time()
             if current_time - last_processed_time < min_interval:
-                # Слишком рано, пропускаем кадр
                 await websocket.send_json({
                     "status": "skipped",
                     "message": "Frame rate limited"
                 })
                 continue
-            
             last_processed_time = current_time
-            
+
             # Обработка кадра
             result = process_frame(data)
-            
             # Отправка результатов обратно
             await manager.send_json(result, websocket)
-            
+
     except WebSocketDisconnect:
         manager.disconnect(websocket)
         print("Client disconnected")
@@ -146,13 +162,11 @@ async def get_frontend():
     <body>
         <div class="container">
             <h1>📹 Video Stream Processor</h1>
-            
             <div class="controls">
                 <button id="startBtn">▶️ Start Streaming</button>
                 <button id="stopBtn" disabled>⏹️ Stop Streaming</button>
                 <span id="status">Status: Ready</span>
             </div>
-
             <div class="video-container">
                 <div>
                     <h3>Live Camera</h3>
@@ -163,13 +177,11 @@ async def get_frontend():
                     <canvas id="canvas"></canvas>
                 </div>
             </div>
-
             <div class="results">
                 <h3>Detection Results:</h3>
                 <pre id="results"></pre>
             </div>
         </div>
-
         <script src="/static/app.js"></script>
     </body>
     </html>
