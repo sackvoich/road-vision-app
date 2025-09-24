@@ -1,0 +1,14 @@
+[project]
+name = "road-mardec-api"
+version = "0.1.0"
+description = "Traffic signs detection with YOLO and Core ML export"
+requires-python = ">=3.11"
+dependencies = [
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "ultralytics",
+    "coremltools==8.3.0",
+    "fastapi>=0.117.1",
+    "uvicorn[standard]>=0.36.0",
+]
