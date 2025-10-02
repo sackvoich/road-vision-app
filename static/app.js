@@ -9,9 +9,11 @@ class VideoProcessor {
         this.ws = null;
         this.isStreaming = false;
         this.fps = 5; // Ограничиваем FPS на клиенте для отправки
+        this.lastResults = null; // Храним последние результаты
         
         this.setupEventListeners();
         this.initializeCamera();
+        this.renderLoop(); // Запускаем цикл отрисовки
     }
 
     setupEventListeners() {
@@ -62,10 +64,11 @@ class VideoProcessor {
 
         this.ws.onmessage = (event) => {
             const data = JSON.parse(event.data);
-            if (data.status === 'skipped') return; // Пропускаем отрисовку, если кадр был пропущен на сервере
+            if (data.status === 'skipped') return;
             
+            // Просто обновляем данные и выводим текст
+            this.lastResults = data;
             this.displayResults(data);
-            this.drawResults(data); // Используем новую функцию
         };
 
         this.ws.onerror = (error) => {
@@ -75,6 +78,7 @@ class VideoProcessor {
 
         this.ws.onclose = () => {
             this.isStreaming = false;
+            this.lastResults = null; // Очищаем результаты при отключении
             this.updateStatus('Disconnected');
             document.getElementById('startBtn').disabled = false;
             document.getElementById('stopBtn').disabled = true;
@@ -90,10 +94,16 @@ class VideoProcessor {
     }
 
     sendFrames() {
-        if (!this.isStreaming) return;
+        if (!this.isStreaming || this.video.videoWidth === 0) return;
 
-        this.ctx.drawImage(this.video, 0, 0, this.canvas.width, this.canvas.height);
-        const imageData = this.canvas.toDataURL('image/jpeg', 0.7);
+        // Используем временный canvas, чтобы не мешать отрисовке
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = this.video.videoWidth;
+        tempCanvas.height = this.video.videoHeight;
+        const tempCtx = tempCanvas.getContext('2d');
+        tempCtx.drawImage(this.video, 0, 0, tempCanvas.width, tempCanvas.height);
+        
+        const imageData = tempCanvas.toDataURL('image/jpeg', 0.7);
         const base64Data = imageData.split(',')[1];
 
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -103,6 +113,24 @@ class VideoProcessor {
         setTimeout(() => this.sendFrames(), 1000 / this.fps);
     }
 
+    renderLoop() {
+        // Рисуем видеопоток на canvas
+        this.ctx.drawImage(this.video, 0, 0, this.canvas.width, this.canvas.height);
+
+        // Поверх рисуем последние полученные результаты
+        if (this.lastResults) {
+            if (this.lastResults.detections && this.lastResults.detections.length > 0) {
+                this.drawDetections(this.lastResults.detections);
+            }
+            if (this.lastResults.segmentations && this.lastResults.segmentations.length > 0) {
+                this.drawSegmentations(this.lastResults.segmentations);
+            }
+        }
+
+        // Зацикливаем
+        requestAnimationFrame(() => this.renderLoop());
+    }
+
     displayResults(data) {
         // Убираем лишнюю информацию для чистоты вывода
         const simplifiedData = {
@@ -110,22 +138,6 @@ class VideoProcessor {
             segmentations: data.segmentations
         };
         this.resultsElement.textContent = JSON.stringify(simplifiedData, null, 2);
-    }
-    
-    // Новая универсальная функция для отрисовки
-    drawResults(data) {
-        // Рисуем оригинальное изображение с камеры
-        this.ctx.drawImage(this.video, 0, 0, this.canvas.width, this.canvas.height);
-        
-        // Рисуем результаты детекции (bounding boxes)
-        if (data.detections && data.detections.length > 0) {
-            this.drawDetections(data.detections);
-        }
-        
-        // Рисуем результаты сегментации (маски)
-        if (data.segmentations && data.segmentations.length > 0) {
-            this.drawSegmentations(data.segmentations);
-        }
     }
 
     drawDetections(detections) {
