@@ -31,8 +31,8 @@ app.add_middleware(
 # --- Загрузка моделей ---
 # Поместите ваши модели в папку 'models'
 try:
-    detection_model = YOLO('./models/traffic_signs_detection_model.pt')
-    segmentation_model = YOLO('./models/zebra_segmentation_model.pt')
+    detection_model = YOLO('./models/traffic_signs_detection_model.mlpackage', task='detect')
+    segmentation_model = YOLO('./models/zebra_segmentation_model.mlpackage', task='segment')
     logger.info("Models loaded successfully.")
 except Exception as e:
     logger.error(f"Error loading models: {e}")
