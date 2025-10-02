@@ -32,6 +32,7 @@ class VideoProcessor {
                 audio: false
             });
             this.video.srcObject = stream;
+            // Убедимся, что размеры canvas соответствуют видео
             this.video.onloadedmetadata = () => {
                 this.canvas.width = this.video.videoWidth;
                 this.canvas.height = this.video.videoHeight;
@@ -62,10 +63,10 @@ class VideoProcessor {
         };
 
         this.ws.onmessage = (event) => {
-            console.log('DEBUG: Received data from server.');
             const data = JSON.parse(event.data);
             if (data.status === 'skipped') return;
             
+            // Просто обновляем данные и выводим текст
             this.lastResults = data;
             this.displayResults(data);
         };
@@ -76,9 +77,8 @@ class VideoProcessor {
         };
 
         this.ws.onclose = () => {
-            console.error('DEBUG: WebSocket disconnected.');
             this.isStreaming = false;
-            this.lastResults = null;
+            this.lastResults = null; // Очищаем результаты при отключении
             this.updateStatus('Disconnected');
             document.getElementById('startBtn').disabled = false;
             document.getElementById('stopBtn').disabled = true;
@@ -96,6 +96,7 @@ class VideoProcessor {
     sendFrames() {
         if (!this.isStreaming || this.video.videoWidth === 0) return;
 
+        // Используем временный canvas, чтобы не мешать отрисовке
         const tempCanvas = document.createElement('canvas');
         tempCanvas.width = this.video.videoWidth;
         tempCanvas.height = this.video.videoHeight;
@@ -113,11 +114,10 @@ class VideoProcessor {
     }
 
     renderLoop() {
-        // DEBUG: Логируем состояние
-        console.log(`DEBUG: Render loop. Have results: ${!!this.lastResults}`);
-        
+        // Рисуем видеопоток на canvas
         this.ctx.drawImage(this.video, 0, 0, this.canvas.width, this.canvas.height);
 
+        // Поверх рисуем последние полученные результаты
         if (this.lastResults) {
             if (this.lastResults.detections && this.lastResults.detections.length > 0) {
                 this.drawDetections(this.lastResults.detections);
@@ -127,10 +127,12 @@ class VideoProcessor {
             }
         }
 
+        // Зацикливаем
         requestAnimationFrame(() => this.renderLoop());
     }
 
     displayResults(data) {
+        // Убираем лишнюю информацию для чистоты вывода
         const simplifiedData = {
             detections: data.detections,
             segmentations: data.segmentations
@@ -143,14 +145,17 @@ class VideoProcessor {
             const [x1, y1, x2, y2] = det.bbox;
             const label = `${det.class} (${(det.confidence * 100).toFixed(1)}%)`;
 
-            this.ctx.strokeStyle = '#00FF00';
+            // Рисуем прямоугольник
+            this.ctx.strokeStyle = '#00FF00'; // Зеленый
             this.ctx.lineWidth = 2;
             this.ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
             
+            // Рисуем фон для текста
             this.ctx.fillStyle = '#00FF00';
             const textWidth = this.ctx.measureText(label).width;
             this.ctx.fillRect(x1, y1 - 15, textWidth + 10, 15);
             
+            // Рисуем текст
             this.ctx.fillStyle = '#000000';
             this.ctx.font = '12px Arial';
             this.ctx.fillText(label, x1 + 5, y1 - 5);
@@ -162,8 +167,8 @@ class VideoProcessor {
             const points = seg.points;
             if (points.length < 2) return;
 
-            this.ctx.fillStyle = 'rgba(255, 0, 255, 0.4)';
-            this.ctx.strokeStyle = '#FF00FF';
+            this.ctx.fillStyle = 'rgba(255, 0, 255, 0.4)'; // Розовый полупрозрачный
+            this.ctx.strokeStyle = '#FF00FF'; // Розовый
             this.ctx.lineWidth = 2;
 
             this.ctx.beginPath();
@@ -176,6 +181,7 @@ class VideoProcessor {
             this.ctx.fill();
             this.ctx.stroke();
             
+            // Подпись для сегментации
             const label = `${seg.class} (${(seg.confidence * 100).toFixed(1)}%)`;
             this.ctx.fillStyle = '#FFFFFF';
             this.ctx.font = '12px Arial';
