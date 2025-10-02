@@ -9,9 +9,11 @@ class VideoProcessor {
         this.ws = null;
         this.isStreaming = false;
         this.fps = 5; // Ограничиваем FPS на клиенте для отправки
+        this.lastResults = null; // Храним последние результаты
         
         this.setupEventListeners();
         this.initializeCamera();
+        this.renderLoop(); // Запускаем цикл отрисовки
     }
 
     setupEventListeners() {
@@ -30,7 +32,6 @@ class VideoProcessor {
                 audio: false
             });
             this.video.srcObject = stream;
-            // Убедимся, что размеры canvas соответствуют видео
             this.video.onloadedmetadata = () => {
                 this.canvas.width = this.video.videoWidth;
                 this.canvas.height = this.video.videoHeight;
@@ -61,11 +62,12 @@ class VideoProcessor {
         };
 
         this.ws.onmessage = (event) => {
+            console.log('DEBUG: Received data from server.');
             const data = JSON.parse(event.data);
-            if (data.status === 'skipped') return; // Пропускаем отрисовку, если кадр был пропущен на сервере
+            if (data.status === 'skipped') return;
             
+            this.lastResults = data;
             this.displayResults(data);
-            this.drawResults(data); // Используем новую функцию
         };
 
         this.ws.onerror = (error) => {
@@ -74,7 +76,9 @@ class VideoProcessor {
         };
 
         this.ws.onclose = () => {
+            console.error('DEBUG: WebSocket disconnected.');
             this.isStreaming = false;
+            this.lastResults = null;
             this.updateStatus('Disconnected');
             document.getElementById('startBtn').disabled = false;
             document.getElementById('stopBtn').disabled = true;
@@ -90,10 +94,15 @@ class VideoProcessor {
     }
 
     sendFrames() {
-        if (!this.isStreaming) return;
+        if (!this.isStreaming || this.video.videoWidth === 0) return;
 
-        this.ctx.drawImage(this.video, 0, 0, this.canvas.width, this.canvas.height);
-        const imageData = this.canvas.toDataURL('image/jpeg', 0.7);
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = this.video.videoWidth;
+        tempCanvas.height = this.video.videoHeight;
+        const tempCtx = tempCanvas.getContext('2d');
+        tempCtx.drawImage(this.video, 0, 0, tempCanvas.width, tempCanvas.height);
+        
+        const imageData = tempCanvas.toDataURL('image/jpeg', 0.7);
         const base64Data = imageData.split(',')[1];
 
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -103,29 +112,30 @@ class VideoProcessor {
         setTimeout(() => this.sendFrames(), 1000 / this.fps);
     }
 
+    renderLoop() {
+        // DEBUG: Логируем состояние
+        console.log(`DEBUG: Render loop. Have results: ${!!this.lastResults}`);
+        
+        this.ctx.drawImage(this.video, 0, 0, this.canvas.width, this.canvas.height);
+
+        if (this.lastResults) {
+            if (this.lastResults.detections && this.lastResults.detections.length > 0) {
+                this.drawDetections(this.lastResults.detections);
+            }
+            if (this.lastResults.segmentations && this.lastResults.segmentations.length > 0) {
+                this.drawSegmentations(this.lastResults.segmentations);
+            }
+        }
+
+        requestAnimationFrame(() => this.renderLoop());
+    }
+
     displayResults(data) {
-        // Убираем лишнюю информацию для чистоты вывода
         const simplifiedData = {
             detections: data.detections,
             segmentations: data.segmentations
         };
         this.resultsElement.textContent = JSON.stringify(simplifiedData, null, 2);
-    }
-    
-    // Новая универсальная функция для отрисовки
-    drawResults(data) {
-        // Рисуем оригинальное изображение с камеры
-        this.ctx.drawImage(this.video, 0, 0, this.canvas.width, this.canvas.height);
-        
-        // Рисуем результаты детекции (bounding boxes)
-        if (data.detections && data.detections.length > 0) {
-            this.drawDetections(data.detections);
-        }
-        
-        // Рисуем результаты сегментации (маски)
-        if (data.segmentations && data.segmentations.length > 0) {
-            this.drawSegmentations(data.segmentations);
-        }
     }
 
     drawDetections(detections) {
@@ -133,17 +143,14 @@ class VideoProcessor {
             const [x1, y1, x2, y2] = det.bbox;
             const label = `${det.class} (${(det.confidence * 100).toFixed(1)}%)`;
 
-            // Рисуем прямоугольник
-            this.ctx.strokeStyle = '#00FF00'; // Зеленый
+            this.ctx.strokeStyle = '#00FF00';
             this.ctx.lineWidth = 2;
             this.ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
             
-            // Рисуем фон для текста
             this.ctx.fillStyle = '#00FF00';
             const textWidth = this.ctx.measureText(label).width;
             this.ctx.fillRect(x1, y1 - 15, textWidth + 10, 15);
             
-            // Рисуем текст
             this.ctx.fillStyle = '#000000';
             this.ctx.font = '12px Arial';
             this.ctx.fillText(label, x1 + 5, y1 - 5);
@@ -155,8 +162,8 @@ class VideoProcessor {
             const points = seg.points;
             if (points.length < 2) return;
 
-            this.ctx.fillStyle = 'rgba(255, 0, 255, 0.4)'; // Розовый полупрозрачный
-            this.ctx.strokeStyle = '#FF00FF'; // Розовый
+            this.ctx.fillStyle = 'rgba(255, 0, 255, 0.4)';
+            this.ctx.strokeStyle = '#FF00FF';
             this.ctx.lineWidth = 2;
 
             this.ctx.beginPath();
@@ -169,7 +176,6 @@ class VideoProcessor {
             this.ctx.fill();
             this.ctx.stroke();
             
-            // Подпись для сегментации
             const label = `${seg.class} (${(seg.confidence * 100).toFixed(1)}%)`;
             this.ctx.fillStyle = '#FFFFFF';
             this.ctx.font = '12px Arial';
