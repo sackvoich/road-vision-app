@@ -11,6 +11,7 @@ import json
 from ultralytics import YOLO
 from ultralytics.utils import ThreadingLocked
 import logging
+import torch
 
 # --- Настройка логгирования ---
 logging.basicConfig(level=logging.INFO)
@@ -31,8 +32,10 @@ app.add_middleware(
 # --- Загрузка моделей ---
 # Поместите ваши модели в папку 'models'
 try:
-    detection_model = YOLO('./models/traffic_signs_detection_model.mlpackage', task='detect')
-    segmentation_model = YOLO('./models/zebra_segmentation_model.mlpackage', task='segment')
+    detection_model = YOLO('./models/traffic_signs_detection_model.pt', task='detect')
+    detection_model.to('cuda' if torch.cuda.is_available() else 'cpu')
+    segmentation_model = YOLO('./models/zebra_segmentation_model.pt', task='segment')
+    segmentation_model.to('cuda' if torch.cuda.is_available() else 'cpu')
     logger.info("Models loaded successfully.")
 except Exception as e:
     logger.error(f"Error loading models: {e}")
