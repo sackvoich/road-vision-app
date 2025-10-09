@@ -11,6 +11,7 @@ import json
 from ultralytics import YOLO
 from ultralytics.utils import ThreadingLocked
 import logging
+import torch
 
 # --- Настройка логгирования ---
 logging.basicConfig(level=logging.INFO)
