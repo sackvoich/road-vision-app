@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Road Vision App</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+    <header class="site-header">
+        <div class="container">
+            <h1 class="app-title">Road Vision App</h1>
+            <p class="subtitle">Обработка видео с камеры: детекция знаков и сегментация разметки</p>
+        </div>
+    </header>
+
+    <main class="container">
+        <nav class="top-nav">
+            <a id="btnInfo" class="button ghost" href="/static/info.html" aria-label="Информация">Информация</a>
+        </nav>
+
+        <section class="grid">
+            <div class="col">
+                <div class="card">
+                    <h2>Камера</h2>
+                    <div class="media-wrap">
+                        <video id="camera" autoplay playsinline muted></video>
+                        <canvas id="frameCanvas" aria-label="Результаты обработки"></canvas>
+                    </div>
+                    <div class="controls">
+                        <button id="btnStartStream" class="button" aria-label="Начать стрим">Начать стрим</button>
+                        <button id="btnStopStream" class="button ghost" aria-label="Остановить стрим" disabled>Остановить стрим</button>
+                        <button id="btnSnap" class="button" aria-label="Сделать кадр">Сделать кадр</button>
+                        <span id="streamStatus" class="status" aria-live="polite"></span>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h2>Загрузка изображения</h2>
+                    <div class="upload">
+                        <input id="fileInput" type="file" accept="image/*" aria-label="Выбор файла изображения">
+                        <button id="btnUpload" class="button" aria-label="Отправить изображение">Отправить изображение</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col">
+                <div class="card">
+                    <h2>Результаты</h2>
+                    <div id="resultsPanel" class="results" aria-live="polite"></div>
+                </div>
+                <p class="info-note">приложение содержит информационную страницу по технологиям разработки данного приложения</p>
+            </div>
+        </section>
+
+        <div id="loader" class="loader hidden" role="status" aria-live="polite">Обработка…</div>
+        <div id="message" class="message hidden" role="alert"></div>
+    </main>
+
+    <footer class="site-footer">
+        <div class="container">
+            <a href="#about" class="anchor">О проекте</a>
+        </div>
+    </footer>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
+
