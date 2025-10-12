@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Справочно-информационная страница</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+    <header class="site-header">
+        <div class="container">
+            <h1 class="app-title">Справочно-информационная страница</h1>
+            <p class="subtitle">приложение содержит информационную страницу по технологиям разработки данного приложения</p>
+        </div>
+    </header>
+
+    <main class="container">
+        <nav class="top-nav">
+            <a class="button ghost" href="/static/index.html">На главную</a>
+            <a class="button" href="/static/people.html">Команда и процесс</a>
+        </nav>
+
+        <section class="card" id="toc">
+            <h2>Оглавление</h2>
+            <ul>
+                <li><a class="anchor" href="#how">Как сделаны страницы</a></li>
+                <li><a class="anchor" href="#tech">Технологии и модели</a></li>
+            </ul>
+        </section>
+
+        <section class="card" id="how">
+            <h2>Как сделаны страницы</h2>
+            <p>Фронтенд сверстан без фреймворков (чистые HTML/CSS/JS). Структура:</p>
+            <pre class="results">/static
+  ├─ index.html
+  ├─ info.html
+  ├─ people.html
+  ├─ css/styles.css
+  └─ js/
+     ├─ app.js
+     └─ info.js</pre>
+            <ul>
+                <li>index.html: камера через getUserMedia, холст canvas, кнопки снимка и загрузки, отправка кадра по существующему WebSocket <code>/ws/video</code>.</li>
+                <li>info.html и people.html: статические страницы, общий стиль, лёгкие улучшения UX через info.js.</li>
+                <li>styles.css: адаптивная сетка, карточки, единый стиль элементов управления.</li>
+            </ul>
+        </section>
+
+        <section class="card" id="tech">
+            <h2>Технологии и модели</h2>
+            <ul>
+                <li>Фронтенд: HTML, CSS, JavaScript, <code>getUserMedia</code>, <code>&lt;canvas&gt;</code>, WebSocket.</li>
+                <li>Взаимодействие: WebSocket с сервером по адресу <code>/ws/video</code>, отправка кадров в формате Base64 JPEG.</li>
+                <li>Бэкенд: FastAPI, Uvicorn, обработка двух моделей в параллельных потоках.</li>
+                <li>Модели: Ultralytics YOLO (детекция знаков и сегментация «зебры»), техники: детекция, сегментация, постпроцессинг боксов/масок.</li>
+                <li>Версии из проекта: fastapi, uvicorn, ultralytics, torch, torchvision, torchaudio, coremltools, opencv-python-headless.</li>
+            </ul>
+        </section>
+
+        <nav class="top-nav">
+            <a class="button ghost" href="/static/index.html">⟵ На главную</a>
+            <a class="button" href="/static/people.html">Команда и процесс</a>
+        </nav>
+    </main>
+
+    <footer class="site-footer">
+        <div class="container">
+            <a href="#top" class="anchor">К началу</a>
+        </div>
+    </footer>
+
+    <script src="/static/js/info.js"></script>
+</body>
+    
+</html>
+
