@@ -5,39 +5,67 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Команда и процесс</title>
     <link rel="stylesheet" href="/static/css/styles.css">
+    <style>
+        .role-card {
+            min-height: 100px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            font-size: 1.2em;
+        }
+        .role-card p {
+            margin: 0;
+        }
+    </style>
 </head>
 <body>
     <header class="site-header">
         <div class="container">
             <h1 class="app-title">Команда и процесс</h1>
-            <p class="subtitle">Краткие заметки о том, как делался проект</p>
+            <p class="subtitle">Распределение ролей в проекте</p>
         </div>
     </header>
 
     <main class="container">
         <nav class="top-nav">
-            <a class="button ghost" href="/static/info.html">⟵ К информации</a>
-            <a class="button" href="/static/index.html">На главную</a>
+            <!-- Ссылки исправлены для корректной работы с FastAPI -->
+            <a class="button ghost" href="/info">⟵ К информации</a>
+            <a class="button" href="/">На главную</a>
         </nav>
 
         <section class="grid">
             <div class="card">
-                <h2>Как делал Савелий</h2>
-                <div class="results" style="min-height:100px"><!-- TODO: добавить описание --></div>
+                <a href="https://github.com/sackvoich">
+                    <h2>Савелий</h2>
+                </a>
+                <div class="results role-card">
+                    <p>AI/ML Engeneer / Project Manager</p>
+                </div>
             </div>
             <div class="card">
-                <h2>Как делал Никита</h2>
-                <div class="results" style="min-height:100px"><!-- TODO: добавить описание --></div>
+                <a href="https://github.com/cvclon3">
+                    <h2>Никита</h2>
+                </a>
+                <div class="results role-card">
+                    <p>Backend Developer</p>
+                </div>
             </div>
             <div class="card">
-                <h2>Как делала Ульяна</h2>
-                <div class="results" style="min-height:100px"><!-- TODO: добавить описание --></div>
+                <a href="https://github.com/vlulyashka">
+                    <h2>Ульяна</h2>
+                </a>
+                <div class="results role-card">
+                   <p>Frontend Developer</p>
+                </div>
             </div>
         </section>
 
         <nav class="top-nav">
-            <a class="button ghost" href="/static/info.html">⟵ К информации</a>
-            <a class="button" href="/static/index.html">На главную</a>
+             <!-- Ссылки исправлены для корректной работы с FastAPI -->
+            <a class="button ghost" href="/info">⟵ К информации</a>
+            <a class="button" href="/">На главную</a>
         </nav>
     </main>
 
@@ -50,4 +78,3 @@
     <script src="/static/js/info.js"></script>
 </body>
 </html>
-

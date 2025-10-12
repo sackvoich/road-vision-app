@@ -2,7 +2,7 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse # FileResponse добавлен
 import cv2
 import numpy as np
 import base64
@@ -12,6 +12,7 @@ from ultralytics import YOLO
 from ultralytics.utils import ThreadingLocked
 import logging
 import torch
+import os # Добавлен для работы с путями
 
 # --- Настройка логгирования ---
 logging.basicConfig(level=logging.INFO)
@@ -29,12 +30,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- Путь к статике ---
+# Определяем абсолютный путь к директории static
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+
+
 # --- Загрузка моделей ---
 # Поместите ваши модели в папку 'models'
 # OSX - macos
 # WIN - windows
 # LIN - linux
-TARGET_OS = 'OSX' 
+TARGET_OS = 'WIN' 
 
 try:
     if TARGET_OS == 'OSX':
@@ -226,115 +232,25 @@ async def websocket_video_endpoint(websocket: WebSocket):
         manager.disconnect(websocket)
 
 
-# --- Статический HTML для фронтенда ---
-@app.get("/")
-async def get_frontend():
-    return HTMLResponse("""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Live Stream Processor</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <style>
-            body { font-family: Arial, sans-serif; margin: 20px; background-color: #f0f2f5; }
-            .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-            .video-container { display: flex; flex-wrap: wrap; gap: 20px; margin-bottom: 20px; justify-content: center; }
-            video, canvas { width: 320px; height: 240px; border: 2px solid #ccc; border-radius: 4px; }
-            button { padding: 10px 20px; margin: 5px; font-size: 16px; border: none; border-radius: 5px; cursor: pointer; background-color: #007bff; color: white; }
-            button:disabled { background-color: #cccccc; }
-            .controls { margin-bottom: 20px; text-align: center; }
-            .results { background: #f5f5f5; padding: 15px; border-radius: 5px; max-height: 200px; overflow-y: auto; }
-            h1, h3 { text-align: center; color: #333; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>📹 Live Stream Processor</h1>
-            <p style="text-align: center;">Want to process a single file? <a href="/upload">Go to the Image Upload page</a>.</p>
-            
-            <div class="controls">
-                <button id="startBtn">▶️ Start Streaming</button>
-                <button id="stopBtn" disabled>⏹️ Stop Streaming</button>
-                <div id="status" style="margin-top: 10px;">Status: Ready</div>
-            </div>
+# --- Отдача статических HTML файлов ---
 
-            <div class="video-container">
-                <div>
-                    <h3>Input</h3>
-                    <video id="video" autoplay muted playsinline></video>
-                </div>
-                <div>
-                    <h3>Processed Output</h3>
-                    <canvas id="canvas" width="640" height="480"></canvas>
-                </div>
-            </div>
+@app.get("/", response_class=FileResponse)
+async def get_index():
+    """Отдаёт главную страницу."""
+    return os.path.join(static_dir, "index.html")
 
-            <div class="results">
-                <h3>Detection Results:</h3>
-                <pre id="results"></pre>
-            </div>
-        </div>
+@app.get("/info", response_class=FileResponse)
+async def get_info():
+    """Отдаёт информационную страницу."""
+    return os.path.join(static_dir, "info.html")
 
-        <script src="/static/app.js"></script>
-    </body>
-    </html>
-    """)
+@app.get("/people", response_class=FileResponse)
+async def get_people():
+    """Отдаёт страницу о команде."""
+    return os.path.join(static_dir, "people.html")
 
-
-
-@app.get("/upload")
-async def get_upload_page():
-    return HTMLResponse("""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Image Upload Processor</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <style>
-            body { font-family: Arial, sans-serif; margin: 20px; background-color: #f0f2f5; }
-            .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-            .video-container { display: flex; flex-wrap: wrap; gap: 20px; margin-bottom: 20px; justify-content: center; }
-            canvas { border: 2px solid #ccc; border-radius: 4px; max-width: 100%; }
-            button { padding: 10px 20px; margin: 5px; font-size: 16px; border: none; border-radius: 5px; cursor: pointer; background-color: #007bff; color: white; }
-            button:disabled { background-color: #cccccc; }
-            .controls { margin-bottom: 20px; text-align: center; }
-            .results { background: #f5f5f5; padding: 15px; border-radius: 5px; max-height: 200px; overflow-y: auto; }
-            h1, h3 { text-align: center; color: #333; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>🖼️ Single Image Processor</h1>
-            <p style="text-align: center;">Want to process a live video stream? <a href="/">Go to the Live Stream page</a>.</p>
-
-            <div class="controls">
-                <input type="file" id="uploadInput" accept="image/*" style="margin-bottom: 10px;"/>
-                <br>
-                <button id="processBtn" disabled>⚙️ Process Image</button>
-                <button id="downloadBtn" disabled>💾 Download Image</button>
-                <div id="status" style="margin-top: 10px;">Status: Ready</div>
-            </div>
-
-            <div class="video-container">
-                <div>
-                    <h3>Processed Output</h3>
-                    <canvas id="canvas" width="640" height="480"></canvas>
-                </div>
-            </div>
-
-            <div class="results">
-                <h3>Detection Results:</h3>
-                <pre id="results"></pre>
-            </div>
-        </div>
-
-        <script src="/static/upload.js"></script>
-    </body>
-    </html>
-    """)
-
-# Монтируем статику
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# Монтируем статику ПОСЛЕ определения роутов, чтобы они имели приоритет
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 if __name__ == "__main__":
     import uvicorn

@@ -20,12 +20,6 @@
   const clientFps = 5;
   let frameTimer = null;
 
-  // WebSocket endpoint from existing backend
-  const wsUrl = (() => {
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${proto}//${location.host}/ws/video`;
-  })();
-
   function showLoader(show) {
     els.loader.classList.toggle('hidden', !show);
   }
@@ -68,7 +62,6 @@
       ctx.strokeStyle = '#22c55e';
       ctx.lineWidth = 2;
       ctx.font = '12px Inter, Arial';
-      ctx.fillStyle = 'rgba(34,197,94,0.85)';
       results.detections.forEach(d => {
         const [x1, y1, x2, y2] = d.bbox || [];
         if ([x1,y1,x2,y2].some(v => typeof v !== 'number')) return;
@@ -76,10 +69,10 @@
         const label = `${d.class ?? ''} ${(d.confidence*100||0).toFixed(1)}%`;
         const tw = ctx.measureText(label).width + 8;
         const th = 16;
+        ctx.fillStyle = 'rgba(34,197,94,0.85)';
         ctx.fillRect(x1, Math.max(0, y1 - th), tw, th);
         ctx.fillStyle = '#0f172a';
         ctx.fillText(label, x1 + 4, Math.max(10, y1 - 4));
-        ctx.fillStyle = 'rgba(34,197,94,0.85)';
       });
     }
     if (results.segmentations && Array.isArray(results.segmentations)) {
@@ -99,7 +92,6 @@
         const label = `${s.class ?? ''} ${(s.confidence*100||0).toFixed(1)}%`;
         ctx.fillStyle = '#e2e8f0';
         ctx.fillText(label, pts[0][0], Math.max(10, pts[0][1] - 4));
-        ctx.fillStyle = 'rgba(59,130,246,0.25)';
       });
     }
   }
@@ -125,7 +117,6 @@
         const data = JSON.parse(ev.data);
         if (data.status === 'skipped') return;
         setResults(data);
-        // Обновляем картинку и рисуем оверлей
         drawFromVideo();
         drawOverlay(data);
       } catch {}
@@ -154,11 +145,9 @@
 
   function scheduleSendFrame() {
     if (!streaming || !ws || ws.readyState !== WebSocket.OPEN) return;
-    // Рисуем текущий кадр и отправляем
     if (els.video.videoWidth > 0) {
-      drawFromVideo();
       const tmp = document.createElement('canvas');
-      tmp.width = els.canvas.width; tmp.height = els.canvas.height;
+      tmp.width = els.video.videoWidth; tmp.height = els.video.videoHeight;
       const tctx = tmp.getContext('2d');
       tctx.drawImage(els.video, 0, 0, tmp.width, tmp.height);
       const dataUrl = tmp.toDataURL('image/jpeg', 0.7);
@@ -167,80 +156,75 @@
     }
     frameTimer = setTimeout(scheduleSendFrame, 1000 / clientFps);
   }
+  
+  // *** ИЗМЕНЁННАЯ ФУНКЦИЯ ***
+  async function sendFileForProcessing(file) {
+      const formData = new FormData();
+      formData.append('file', file);
 
-  async function requestOnceWithWS(base64Data) {
-    return new Promise((resolve, reject) => {
-      const ws = new WebSocket(wsUrl);
-      let finished = false;
-      const finish = (fn, val) => { if (!finished) { finished = true; fn(val); } };
-      const to = setTimeout(() => finish(reject, new Error('Timeout')), 20000);
-      ws.onopen = () => { ws.send(base64Data); };
-      ws.onmessage = (ev) => {
-        try {
-          const data = JSON.parse(ev.data);
-          clearTimeout(to);
-          finish(resolve, data);
-          ws.close();
-        } catch (e) { clearTimeout(to); finish(reject, e); ws.close(); }
-      };
-      ws.onerror = (e) => { clearTimeout(to); finish(reject, e); };
-      ws.onclose = () => {};
-    });
+      const response = await fetch('/api/image', {
+          method: 'POST',
+          body: formData
+      });
+
+      if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`Server error: ${response.status} - ${errorText}`);
+      }
+      return await response.json();
   }
 
+  // *** ИЗМЕНЁННАЯ ФУНКЦИЯ ***
   async function snapAndSend() {
+    if (!streamOk) {
+      showMessage('Камера не активна.');
+      return;
+    }
     drawFromVideo();
     showLoader(true);
     showMessage('');
     try {
       const blob = await new Promise(res => els.canvas.toBlob(res, 'image/jpeg', 0.9));
-      const base64 = await blobToBase64(blob);
-      const base64Data = base64.split(',')[1];
-      const result = await requestOnceWithWS(base64Data);
+      const result = await sendFileForProcessing(new File([blob], "snapshot.jpg", {type: "image/jpeg"}));
+      
       setResults(result);
-      // перерисуем кадр и нанесем оверлей
-      drawFromVideo();
-      drawOverlay(result);
+      drawFromVideo(); // Перерисовываем исходный кадр
+      drawOverlay(result); // Рисуем результаты поверх
     } catch (e) {
-      showMessage('Ошибка обработки кадра');
+      console.error(e);
+      showMessage(`Ошибка обработки кадра: ${e.message}`);
     } finally {
       showLoader(false);
     }
   }
 
+  // *** ИЗМЕНЁННАЯ ФУНКЦИЯ ***
   async function uploadSelected() {
     const file = els.fileInput.files && els.fileInput.files[0];
     if (!file) { showMessage('Выберите изображение.'); return; }
     showLoader(true); showMessage('');
     try {
-      // Отобразим выбранное изображение в canvas, затем отправим как через WS
+      // Отобразим выбранное изображение в canvas
       const url = URL.createObjectURL(file);
       const img = await loadImage(url);
       els.canvas.width = img.width; els.canvas.height = img.height;
       ctx.drawImage(img, 0, 0);
       URL.revokeObjectURL(url);
 
-      const blob = await new Promise(res => els.canvas.toBlob(res, 'image/jpeg', 0.95));
-      const base64 = await blobToBase64(blob);
-      const base64Data = base64.split(',')[1];
-      const result = await requestOnceWithWS(base64Data);
+      // Отправим файл и получим результат
+      const result = await sendFileForProcessing(file);
       setResults(result);
+
+      // Перерисовываем исходное изображение и рисуем оверлей
+      ctx.drawImage(img, 0, 0); 
       drawOverlay(result);
     } catch (e) {
-      showMessage('Ошибка отправки изображения.');
+      console.error(e);
+      showMessage(`Ошибка отправки изображения: ${e.message}`);
     } finally {
       showLoader(false);
       els.fileInput.value = '';
     }
-  }
-
-  function blobToBase64(blob) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
-    });
   }
 
   function loadImage(src) {
@@ -262,5 +246,3 @@
   // Kickoff
   initCamera();
 })();
-
-
