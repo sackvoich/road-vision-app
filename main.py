@@ -31,12 +31,28 @@ app.add_middleware(
 
 # --- Загрузка моделей ---
 # Поместите ваши модели в папку 'models'
+# OSX - macos
+# WIN - windows
+# LIN - linux
+TARGET_OS = 'WIN' 
+
 try:
-    detection_model = YOLO('./models/traffic_signs_detection_model.pt', task='detect')
-    detection_model.to('cuda' if torch.cuda.is_available() else 'cpu')
-    segmentation_model = YOLO('./models/zebra_segmentation_model.pt', task='segment')
-    segmentation_model.to('cuda' if torch.cuda.is_available() else 'cpu')
-    logger.info("Models loaded successfully.")
+    if TARGET_OS == 'OSX':
+        logger.info(f"Target OS is {TARGET_OS}")
+        detection_model = YOLO('./models/traffic_signs_detection_model.mlpackage', task='detect')
+        segmentation_model = YOLO('./models/zebra_segmentation_model.mlpackage', task='segment')
+        logger.info("Models loaded successfully.")
+    elif TARGET_OS == 'WIN':
+        logger.info(f"Target OS is {TARGET_OS}")
+        detection_model = YOLO('./models/traffic_signs_detection_model.pt', task='detect')
+        detection_model.to('cuda' if torch.cuda.is_available() else 'cpu')
+        segmentation_model = YOLO('./models/zebra_segmentation_model.pt', task='segment')
+        segmentation_model.to('cuda' if torch.cuda.is_available() else 'cpu')
+        logger.info("Models loaded successfully.")
+    else:
+        logger.info(f"Target OS is {TARGET_OS}")
+        logger.error("Current os is not supported")
+        raise NotImplementedError
 except Exception as e:
     logger.error(f"Error loading models: {e}")
     # Если модели не загрузились, приложение не сможет работать
