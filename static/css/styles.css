@@ -25,7 +25,7 @@ body {
 .app-title { margin: 0; font-size: 28px; }
 .subtitle { margin: 6px 0 0; color: var(--muted); }
 
-.top-nav { display: flex; justify-content: flex-end; margin: 16px 0; }
+.top-nav { display: flex; justify-content: flex-end; margin: 16px 0; gap: 10px; }
 
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
@@ -84,4 +84,46 @@ video, canvas { width: 100%; height: auto; display: block; }
 .site-footer { margin-top: 24px; padding: 16px 0; border-top: 1px solid var(--border); background: #fff; }
 .anchor { color: var(--primary); text-decoration: none; }
 .anchor:hover { text-decoration: underline; }
+
+.drop-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 9999;
+
+  background: rgba(15, 23, 42, 0.85); 
+  
+  transition: opacity 0.2s ease-in-out, visibility 0s 0.2s ease-in-out;
+  opacity: 0;
+  visibility: hidden;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.drop-overlay.is-dragover {
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 0.2s ease-in-out;
+}
+
+.drop-overlay-content {
+  color: #e2e8f0;
+  border: 4px dashed var(--primary);
+  padding: 40px 60px;
+  border-radius: 20px;
+  background: rgba(0,0,0,0.2);
+}
+
+.drop-overlay-content h2 {
+  margin: 0 0 10px;
+  font-size: 2em;
+}
+
+.hidden { display: none !important; }
+
 
